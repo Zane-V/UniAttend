@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import CleanupController from "@/components/CleanupController";
 
 export const metadata: Metadata = {
   title: "UniAttend | Biometric Attendance System",
@@ -13,7 +14,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className="font-sans antialiased">
+      <body className="font-sans antialiased" suppressHydrationWarning>
+        <CleanupController />
         {children}
       </body>
     </html>

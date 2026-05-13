@@ -37,10 +37,9 @@ const steps = [
   { key: 'biometric', label: 'Biometrics', icon: Scan, color: 'bg-violet-600' },
 ];
 
-const LIVENESS_SAMPLE_COUNT = 12;
-const LIVENESS_SAMPLE_DELAY_MS = 180;
-const MIN_OPEN_EYE_RATIO = 0.18;
-const MIN_BLINK_DROP_RATIO = 0.24;
+const LIVENESS_SAMPLE_COUNT = 10;
+const LIVENESS_SAMPLE_DELAY_MS = 200;
+const MIN_HEAD_MOVEMENT_PX = 40;
 const MIN_LIVENESS_BRIGHTNESS = 38;
 
 function distanceInMeters(from: GeolocationCoordinates, to: { latitude: number; longitude: number }) {
@@ -53,23 +52,8 @@ function distanceInMeters(from: GeolocationCoordinates, to: { latitude: number; 
   const a = Math.sin(latDelta / 2) ** 2 +
     Math.cos(fromLat) * Math.cos(toLat) * Math.sin(lonDelta / 2) ** 2;
 
-  return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function pointDistance(a: { x: number; y: number }, b: { x: number; y: number }) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function eyeAspectRatio(eye: Array<{ x: number; y: number }>) {
-  if (eye.length < 6) return 0;
-  const vertical = pointDistance(eye[1], eye[5]) + pointDistance(eye[2], eye[4]);
-  const horizontal = pointDistance(eye[0], eye[3]);
-  return horizontal === 0 ? 0 : vertical / (2 * horizontal);
-}
-
-function faceEyeRatio(face: FaceAnalysisResult) {
-  return (eyeAspectRatio(face.landmarks.leftEye) + eyeAspectRatio(face.landmarks.rightEye)) / 2;
-}
+   return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+ }
 
 function wait(ms: number) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
@@ -173,15 +157,15 @@ export default function StudentPortal() {
     setActiveSession(session);
     setStudent(found);
     setError('');
-    setGpsStatus('idle');
-    setGpsError('');
-    setGpsDistance(null);
-    setGpsAccuracy(null);
-    setBiometricStatus('idle');
-    setBiometricError('');
-    setFaceMatchConfidence(null);
-    setLivenessStatus('idle');
-    advance('gps');
+     setGpsStatus('idle');
+     setGpsError('');
+     setGpsDistance(null);
+     setGpsAccuracy(null);
+     setBiometricStatus('idle');
+     setBiometricError('');
+     setFaceMatchConfidence(null);
+     setLivenessStatus('idle');
+     advance('gps');
   };
 
   const verifyLocation = () => {
@@ -328,10 +312,10 @@ export default function StudentPortal() {
     };
   };
 
-  const runBlinkLivenessCheck = async () => {
+  const runHeadMovementLivenessCheck = async () => {
     setLivenessStatus('waiting');
 
-    const eyeRatios: number[] = [];
+    const positions: number[] = [];
     let lastFace: FaceAnalysisResult | null = null;
 
     for (let index = 0; index < LIVENESS_SAMPLE_COUNT; index += 1) {
@@ -341,7 +325,7 @@ export default function StudentPortal() {
         return {
           ok: false,
           face: null,
-          message: 'The camera view is too dim for reliable liveness. Face a brighter area, increase your screen brightness, or ask the lecturer to switch on more light, then try again.',
+          message: 'The camera view is too dim. Face a brighter area or increase screen brightness, then try again.',
         };
       }
 
@@ -350,25 +334,25 @@ export default function StudentPortal() {
           ok: false,
           face: null,
           message: faces.length === 0
-            ? 'No face detected during liveness check. Keep your face visible and blink once.'
-            : 'More than one face detected during liveness check. Only the registered student can be in frame.',
+            ? 'No face detected. Keep your face centered in the frame.'
+            : 'Multiple faces detected. Only the registered student should be visible.',
         };
       }
 
       lastFace = faces[0];
-      eyeRatios.push(faceEyeRatio(faces[0]));
+      positions.push(faces[0].faceCenterX);
       await wait(LIVENESS_SAMPLE_DELAY_MS);
     }
 
-    const maxEyeRatio = Math.max(...eyeRatios);
-    const minEyeRatio = Math.min(...eyeRatios);
-    const blinkDrop = maxEyeRatio === 0 ? 0 : (maxEyeRatio - minEyeRatio) / maxEyeRatio;
+    const minPos = Math.min(...positions);
+    const maxPos = Math.max(...positions);
+    const movement = maxPos - minPos;
 
-    if (maxEyeRatio < MIN_OPEN_EYE_RATIO || blinkDrop < MIN_BLINK_DROP_RATIO) {
+    if (movement < MIN_HEAD_MOVEMENT_PX) {
       return {
         ok: false,
         face: lastFace,
-        message: 'Liveness check failed. Blink once clearly while looking at the camera, then try again.',
+        message: 'Liveness check failed. Move your head slowly side-to-side (left and right) while looking at the camera, then try again.',
       };
     }
 
@@ -379,6 +363,19 @@ export default function StudentPortal() {
   const verifyBiometric = async () => {
     if (!videoRef.current || !canvasRef.current || !student) return;
 
+    // Ensure camera is running (retry after failure)
+    if (!streamRef.current) {
+      await startBiometricCamera();
+      if (!streamRef.current) {
+        setBiometricStatus('error');
+        setBiometricError('Could not start camera. Please allow camera access and try again.');
+        setLivenessStatus('rejected');
+        return;
+      }
+      // Give camera a moment to warm up
+      await wait(300);
+    }
+
     setBiometricStatus('scanning');
     setBiometricError('');
     setFaceMatchConfidence(null);
@@ -388,7 +385,7 @@ export default function StudentPortal() {
     let livenessResult;
     try {
       registeredDescriptor = await getRegisteredDescriptor();
-      livenessResult = await runBlinkLivenessCheck();
+      livenessResult = await runHeadMovementLivenessCheck();
     } catch {
       setBiometricStatus('error');
       setBiometricError('Could not scan the face. Keep your face visible and try again.');
@@ -611,10 +608,10 @@ export default function StudentPortal() {
                   <div className="w-14 h-14 bg-violet-600 rounded-2xl flex items-center justify-center mb-6 shadow-xl shadow-violet-500/20">
                     <Scan className="w-7 h-7 text-white" />
                   </div>
-                  <h1 className="text-2xl font-black text-white mb-1">Layer 3: Biometrics</h1>
-                  <p className="text-slate-400 text-sm mb-6 leading-relaxed">
-                    Face the camera alone and blink once during the scan. Your live face will be compared with the registered student record.
-                  </p>
+                   <h1 className="text-2xl font-black text-white mb-1">Layer 3: Biometrics</h1>
+                   <p className="text-slate-400 text-sm mb-6 leading-relaxed">
+                     Face the camera alone and move your head slowly side-to-side during the scan. Your live face will be compared with the registered student record.
+                   </p>
                   <div className="mb-5 rounded-2xl border border-amber-400/20 bg-amber-400/10 p-4 text-xs font-bold leading-relaxed text-amber-200">
                     If the hall is dim, face the brightest side of the room or raise your phone screen brightness before scanning.
                   </div>
@@ -657,7 +654,7 @@ export default function StudentPortal() {
                     <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/60 to-transparent">
                       <div className="flex items-center gap-2 bg-violet-600/80 backdrop-blur-sm px-3 py-2 rounded-xl text-xs font-black text-white uppercase tracking-widest">
                         <Eye className="w-4 h-4 animate-pulse" />
-                        Blink once during scan
+                        Move head side-to-side during scan
                       </div>
                     </div>
                   </div>
@@ -671,11 +668,11 @@ export default function StudentPortal() {
                           : 'bg-violet-500/10 border border-violet-500/20 text-violet-300'
                     }`}>
                       {livenessStatus === 'verified' ? <CheckCircle2 className="w-5 h-5 flex-shrink-0" /> : <Eye className="w-5 h-5 flex-shrink-0" />}
-                      {livenessStatus === 'verified'
-                        ? 'Liveness verified'
-                        : biometricStatus === 'scanning'
-                          ? 'Checking for a real blink...'
-                          : 'When scanning starts, blink once clearly.'}
+                       {livenessStatus === 'verified'
+                         ? 'Liveness verified'
+                         : biometricStatus === 'scanning'
+                           ? 'Checking for head movement...'
+                           : 'When scanning starts, move your head slowly side-to-side.'}
                     </div>
                   )}
 

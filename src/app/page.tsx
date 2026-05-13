@@ -77,7 +77,7 @@ export default function Home() {
       </div>
 
       <footer className="mt-16 text-slate-400 text-sm">
-        &copy; 2026 UniAttend System. All rights reserved.
+        &copy; 2026 UniAttend System. All rights reserved. | <i> Zane Tech.</i>
       </footer>
     </main>
   );

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head><title>DB Cleanup</title></head>
+<body>
+<h1>IndexedDB Cleanup Tool</h1>
+<button onclick="runCleanup()">Run Cleanup Now</button>
+<button onclick="listData()">List All Check-ins</button>
+<button onclick="clearAll()">Clear ALL Check-ins</button>
+<pre id="output"></pre>
+
+<script type="module">
+import { readAllCheckIns, deleteExpiredUnprintedCheckIns, CHECKIN_PRINT_WINDOW_MS } from './src/lib/attendance.ts?raw';
+
+// Inline the functions since we can't import directly
+const DB_NAME = 'uniattend_db';
+const DB_VERSION = 2;
+const CHECKINS_STORE = 'checkIns';
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function readAllCheckIns() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('checkIns', 'readonly');
+    const store = tx.objectStore('checkIns');
+    const request = store.getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function getCheckInListAge(checkIn) {
+  return Date.now() - new Date(checkIn.sessionStartedAt || checkIn.checkedInAt).getTime();
+}
+
+async function deleteExpiredUnprintedCheckIns(checkIns) {
+  const expired = checkIns.filter(item => !item.printedAt && getCheckInListAge(item) > CHECKIN_PRINT_WINDOW_MS);
+  if (expired.length === 0) return checkIns;
+  
+  const db = await openDb();
+  await Promise.all(expired.map(item => {
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('checkIns', 'readwrite');
+      const store = tx.objectStore('checkIns');
+      store.delete(item.id);
+      store.transaction.oncomplete = () => resolve();
+      store.transaction.onerror = () => reject(store.transaction.error);
+    });
+  }));
+  
+  const expiredIds = new Set(expired.map(item => item.id));
+  return checkIns.filter(item => !expiredIds.has(item.id));
+}
+
+window.listData = async function() {
+  const output = document.getElementById('output');
+  try {
+    const all = await readAllCheckIns();
+    const now = Date.now();
+    output.textContent = JSON.stringify(all.map(c => ({
+      courseTitle: c.courseTitle,
+      sessionStartedAt: c.sessionStartedAt,
+      checkedInAt: c.checkedInAt,
+      printedAt: c.printedAt,
+      ageMs: now - new Date(c.sessionStartedAt || c.checkedInAt).getTime(),
+      willExpire: !c.printedAt && (now - new Date(c.sessionStartedAt || c.checkedInAt).getTime()) > (60 * 60 * 1000)
+    })), null, 2);
+  } catch (e) {
+    output.textContent = 'Error: ' + e.message;
+  }
+};
+
+window.runCleanup = async function() {
+  const output = document.getElementById('output');
+  try {
+    const all = await readAllCheckIns();
+    const before = all.length;
+    const remaining = await deleteExpiredUnprintedCheckIns(all);
+    const deleted = before - remaining.length;
+    output.textContent = `Deleted ${deleted} expired check-ins. ${remaining.length} remaining.\n\nRemaining:\n` + 
+      JSON.stringify(remaining.map(c => ({ courseTitle: c.courseTitle, printedAt: c.printedAt })), null, 2);
+  } catch (e) {
+    output.textContent = 'Error: ' + e.message;
+  }
+};
+
+window.clearAll = async function() {
+  const output = document.getElementById('output');
+  try {
+    const db = await openDb();
+    const tx = db.transaction('checkIns', 'readwrite');
+    const store = tx.objectStore('checkIns');
+    store.clear();
+    await new Promise(resolve => tx.oncomplete = resolve);
+    output.textContent = 'All check-ins cleared!';
+  } catch (e) {
+    output.textContent = 'Error: ' + e.message;
+  }
+};
+</script>
+</body>
+</html>

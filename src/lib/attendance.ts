@@ -95,6 +95,31 @@ interface MetaRecord<T> {
   value: T;
 }
 
+const USE_MONGODB_API = process.env.NEXT_PUBLIC_ATTENDANCE_STORAGE === 'mongodb';
+const ATTENDANCE_API = '/api/attendance';
+
+async function apiGet<T>(action: string, params: Record<string, string> = {}): Promise<T> {
+  const url = new URL(ATTENDANCE_API, window.location.origin);
+  url.searchParams.set('action', action);
+  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+
+  const response = await fetch(url);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Attendance API request failed.');
+  return data as T;
+}
+
+async function apiPost(action: string, payload: Record<string, unknown> = {}) {
+  const response = await fetch(ATTENDANCE_API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Attendance API request failed.');
+  return data;
+}
+
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function closeAllConnections(): Promise<void> {
@@ -189,6 +214,8 @@ export function generatePin() {
 // ── Active Sessions (supports multiple simultaneous sessions) ──
 
 export async function readActiveSessions(): Promise<ActiveSession[]> {
+  if (USE_MONGODB_API) return apiGet<ActiveSession[]>('activeSessions');
+
   const sessions = await getMeta<ActiveSession[]>(SESSIONS_KEY);
   if (!sessions) return [];
   const now = Date.now();
@@ -202,29 +229,41 @@ export async function readActiveSessions(): Promise<ActiveSession[]> {
 }
 
 export async function readActiveSession(): Promise<ActiveSession | null> {
+  if (USE_MONGODB_API) return apiGet<ActiveSession | null>('activeSession');
+
   const sessions = await readActiveSessions();
   return sessions.length > 0 ? sessions[0] : null;
 }
 
 export function saveActiveSession(session: ActiveSession) {
+  if (USE_MONGODB_API) return apiPost('saveActiveSession', { session });
+
   return setMeta(SESSIONS_KEY, [session]);
 }
 
 export function saveActiveSessions(sessions: ActiveSession[]) {
+  if (USE_MONGODB_API) return apiPost('saveActiveSessions', { sessions });
+
   return setMeta(SESSIONS_KEY, sessions);
 }
 
 export function clearActiveSession() {
+  if (USE_MONGODB_API) return apiPost('clearActiveSession');
+
   return deleteMeta(SESSIONS_KEY);
 }
 
 export function clearActiveSessions() {
+  if (USE_MONGODB_API) return apiPost('clearActiveSessions');
+
   return deleteMeta(SESSIONS_KEY);
 }
 
 // ── Admin Print Access ──
 
 export async function readAdminPrintAccess(): Promise<AdminPrintAccess | null> {
+  if (USE_MONGODB_API) return apiGet<AdminPrintAccess | null>('adminPrintAccess');
+
   const access = await getMeta<AdminPrintAccess>(ADMIN_PRINT_KEY);
   if (!access) return null;
   if (!access.pin || new Date(access.expiresAt).getTime() <= Date.now()) {
@@ -235,21 +274,29 @@ export async function readAdminPrintAccess(): Promise<AdminPrintAccess | null> {
 }
 
 export function saveAdminPrintAccess(access: AdminPrintAccess) {
+  if (USE_MONGODB_API) return apiPost('saveAdminPrintAccess', { access });
+
   return setMeta(ADMIN_PRINT_KEY, access);
 }
 
 export function clearAdminPrintAccess() {
+  if (USE_MONGODB_API) return apiPost('clearAdminPrintAccess');
+
   return deleteMeta(ADMIN_PRINT_KEY);
 }
 
 // ── Students ──
 
 export async function readStudents(): Promise<RegisteredStudent[]> {
+  if (USE_MONGODB_API) return apiGet<RegisteredStudent[]>('students');
+
   const students = await store<RegisteredStudent[]>(STUDENTS_STORE, 'readonly', objectStore => objectStore.getAll());
   return students.map(normalizeStudentRecord).sort((a, b) => new Date(b.registeredAt).getTime() - new Date(a.registeredAt).getTime());
 }
 
 export async function readStudentsByLevel(level: string): Promise<RegisteredStudent[]> {
+  if (USE_MONGODB_API) return apiGet<RegisteredStudent[]>('studentsByLevel', { level });
+
   const students = await store<RegisteredStudent[]>(STUDENTS_STORE, 'readonly', objectStore => {
     const index = objectStore.index('level');
     return index.getAll(level);
@@ -258,10 +305,14 @@ export async function readStudentsByLevel(level: string): Promise<RegisteredStud
 }
 
 export function saveStudent(student: RegisteredStudent) {
+  if (USE_MONGODB_API) return apiPost('saveStudent', { student });
+
   return store<IDBValidKey>(STUDENTS_STORE, 'readwrite', objectStore => objectStore.put(normalizeStudentRecord(student)));
 }
 
 export function deleteStudent(id: string) {
+  if (USE_MONGODB_API) return apiPost('deleteStudent', { id });
+
   return store<undefined>(STUDENTS_STORE, 'readwrite', objectStore => objectStore.delete(id));
 }
 
@@ -277,28 +328,91 @@ function getCheckInListAge(checkIn: AttendanceCheckIn) {
 }
 
 async function deleteExpiredUnprintedCheckIns(checkIns: AttendanceCheckIn[]) {
-  const expired = checkIns.filter(item => !item.printedAt && getCheckInListAge(item) > CHECKIN_PRINT_WINDOW_MS);
+  const expired = checkIns.filter(item => getCheckInListAge(item) > CHECKIN_PRINT_WINDOW_MS);
   if (expired.length === 0) return checkIns;
 
-  await Promise.all(expired.map(item =>
-    store<undefined>(CHECKINS_STORE, 'readwrite', objectStore => objectStore.delete(item.id))
-  ));
+  // Delete all expired check-ins (printed and unprinted) in a single transaction
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(CHECKINS_STORE, 'readwrite');
+    const store = tx.objectStore(CHECKINS_STORE);
+    expired.forEach(item => store.delete(item.id));
+    tx.oncomplete = () => resolve();
+    tx.onerror = (e) => reject(tx.error || e);
+  });
 
   const expiredIds = new Set(expired.map(item => item.id));
   return checkIns.filter(item => !expiredIds.has(item.id));
 }
 
+// Background cleanup: runs periodically regardless of page visits
+let cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+
+export function startBackgroundCleanup() {
+  if (cleanupIntervalId !== null) return; // Already started
+
+  if (USE_MONGODB_API) {
+    readCheckIns().catch(error => console.error('Initial cleanup failed:', error));
+    cleanupIntervalId = setInterval(() => {
+      readCheckIns().catch(error => console.error('Hourly cleanup failed:', error));
+    }, 60 * 60 * 1000);
+    return;
+  }
+
+  // Run immediately on startup
+  (async () => {
+    try {
+      const allCheckIns = await readAllCheckIns();
+      const removed = await deleteExpiredUnprintedCheckIns(allCheckIns);
+      if (removed.length < allCheckIns.length) {
+        console.log(`[Cleanup] Removed ${allCheckIns.length - removed.length} expired check-ins`);
+      }
+    } catch (error) {
+      console.error('Initial cleanup failed:', error);
+    }
+  })();
+
+  // Then run every hour
+  cleanupIntervalId = setInterval(async () => {
+    try {
+      const allCheckIns = await readAllCheckIns();
+      const removed = await deleteExpiredUnprintedCheckIns(allCheckIns);
+      if (removed.length < allCheckIns.length) {
+        console.log(`[Cleanup] Removed ${allCheckIns.length - removed.length} expired check-ins`);
+      }
+    } catch (error) {
+      console.error('Hourly cleanup failed:', error);
+    }
+  }, 60 * 60 * 1000);
+}
+
+export function stopBackgroundCleanup() {
+  if (cleanupIntervalId !== null) {
+    clearInterval(cleanupIntervalId);
+    cleanupIntervalId = null;
+  }
+}
+
 export async function readCheckIns(): Promise<AttendanceCheckIn[]> {
+  if (USE_MONGODB_API) return apiGet<AttendanceCheckIn[]>('checkIns');
+
   const checkIns = await readAllCheckIns();
   return deleteExpiredUnprintedCheckIns(checkIns);
 }
 
 export async function readCheckInsBySession(sessionId: string): Promise<AttendanceCheckIn[]> {
+  if (USE_MONGODB_API) return apiGet<AttendanceCheckIn[]>('checkInsBySession', { sessionId });
+
   const all = await readCheckIns();
   return all.filter(c => c.sessionId === sessionId);
 }
 
 export async function saveCheckIn(checkIn: AttendanceCheckIn) {
+  if (USE_MONGODB_API) {
+    await apiPost('saveCheckIn', { checkIn });
+    return;
+  }
+
   // Prevent duplicate check-in for same session + regNumber
   const existing = await store<AttendanceCheckIn[]>(CHECKINS_STORE, 'readonly', objectStore => {
     const index = objectStore.index('sessionId');
@@ -316,6 +430,11 @@ export async function saveCheckIn(checkIn: AttendanceCheckIn) {
 }
 
 export async function markCheckInsPrinted(sessionId: string) {
+  if (USE_MONGODB_API) {
+    await apiPost('markCheckInsPrinted', { sessionId });
+    return;
+  }
+
   const existing = await store<AttendanceCheckIn[]>(CHECKINS_STORE, 'readonly', objectStore => {
     const index = objectStore.index('sessionId');
     return index.getAll(sessionId);
@@ -328,8 +447,19 @@ export async function markCheckInsPrinted(sessionId: string) {
 }
 
 export async function deleteCheckIn(id: string, sessionId?: string) {
+  if (USE_MONGODB_API) {
+    await apiPost('deleteCheckIn', { id, sessionId });
+    return;
+  }
+
   const existing = await store<AttendanceCheckIn | undefined>(CHECKINS_STORE, 'readonly', objectStore => objectStore.get(id));
   if (!existing) return;
   if (sessionId && existing.sessionId !== sessionId) return;
   return store<undefined>(CHECKINS_STORE, 'readwrite', objectStore => objectStore.delete(id));
+}
+
+export async function clearAllCheckIns() {
+  if (USE_MONGODB_API) return apiPost('clearAllCheckIns');
+
+  return store<undefined>(CHECKINS_STORE, 'readwrite', objectStore => objectStore.clear());
 }

@@ -20,6 +20,7 @@ import {
   AdminPrintAccess,
   AttendanceCheckIn,
   CHECKIN_PRINT_WINDOW_MS,
+  clearActiveSessions,
   clearAdminPrintAccess,
   generatePin,
   markCheckInsPrinted,
@@ -32,7 +33,6 @@ import {
 } from '@/lib/attendance';
 import { generateCheckInPDF } from '@/lib/pdfGenerator';
 
-const LECTURER_PASSWORD = 'EDIKAN';
 const ATTENDANCE_RADIUS_METERS = 30;
 
 interface LecturePrintOption {
@@ -271,14 +271,25 @@ export default function LecturerDashboard() {
     [now, sessions, activeSession, checkIns.length]
   );
 
-  const unlock = () => {
-    if (password.trim().toUpperCase() !== LECTURER_PASSWORD) {
-      setPasswordError('Incorrect lecturer password.');
-      setPassword('');
-      return;
-    }
-    setUnlocked(true);
+  const unlock = async () => {
     setPasswordError('');
+    try {
+      const response = await fetch('/api/lecturer-auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: password.trim() }),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        setUnlocked(true);
+      } else {
+        setPasswordError(data.error || 'Authentication failed.');
+        setPassword('');
+      }
+    } catch {
+      setPasswordError('Unable to verify password. Please try again.');
+      setPassword('');
+    }
   };
 
   const startSession = async () => {
@@ -420,7 +431,7 @@ export default function LecturerDashboard() {
                 setPassword(event.target.value);
                 setPasswordError('');
               }}
-              onKeyDown={event => event.key === 'Enter' && unlock()}
+              onKeyDown={async event => { if (event.key === 'Enter') await unlock() }}
               className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
               autoFocus
             />
@@ -456,10 +467,12 @@ export default function LecturerDashboard() {
               </div>
             </div>
 
-            <div className={`rounded-xl px-4 py-2 text-xs font-black uppercase tracking-wider ${
-              sessions.length > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'
-            }`}>
-              {sessions.length > 0 ? `${sessions.length} Active Session${sessions.length > 1 ? 's' : ''}` : 'No Active Session'}
+<div className="flex items-center gap-3">
+              <div className={`rounded-xl px-4 py-2 text-xs font-black uppercase tracking-wider ${
+                sessions.length > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'
+              }`}>
+                {sessions.length > 0 ? `${sessions.length} Active Session${sessions.length > 1 ? 's' : ''}` : 'No Active Session'}
+              </div>
             </div>
           </div>
         </header>

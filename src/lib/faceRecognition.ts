@@ -2,7 +2,7 @@
 
 const MODEL_URL = '/models';
 
-export const FACE_MATCH_THRESHOLD = 0.56;
+export const FACE_MATCH_THRESHOLD = 0.5;
 
 let modelsPromise: Promise<void> | null = null;
 let faceApiPromise: Promise<typeof import('@vladmandic/face-api')> | null = null;
@@ -19,6 +19,7 @@ export interface FaceAnalysisResult extends FaceDescriptorResult {
     leftEye: Array<{ x: number; y: number }>;
     rightEye: Array<{ x: number; y: number }>;
   };
+  faceCenterX: number;
 }
 
 function getFaceApi() {
@@ -63,14 +64,18 @@ export async function detectFaceAnalyses(input: FaceInput): Promise<FaceAnalysis
     .withFaceLandmarks()
     .withFaceDescriptors();
 
-  return detections.map(item => ({
-    descriptor: Array.from(item.descriptor),
-    score: item.detection.score,
-    landmarks: {
-      leftEye: item.landmarks.getLeftEye().map(point => ({ x: point.x, y: point.y })),
-      rightEye: item.landmarks.getRightEye().map(point => ({ x: point.x, y: point.y })),
-    },
-  }));
+  return detections.map(item => {
+    const box = item.detection.box;
+    return {
+      descriptor: Array.from(item.descriptor),
+      score: item.detection.score,
+      landmarks: {
+        leftEye: item.landmarks.getLeftEye().map(point => ({ x: point.x, y: point.y })),
+        rightEye: item.landmarks.getRightEye().map(point => ({ x: point.x, y: point.y })),
+      },
+      faceCenterX: box.x + box.width / 2,
+    };
+  });
 }
 
 export function faceDistance(first: number[], second: number[]) {
